@@ -1,0 +1,6 @@
+streamlit==1.30.0
+requests==2.31.0
+python-decouple==3.8
+Pillow==10.2.0
+streamlit-option-menu==0.3.12
+extra-streamlit-components==0.1.60
