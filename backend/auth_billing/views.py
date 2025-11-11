@@ -27,6 +27,9 @@ class RegisterView(APIView):
 
     @extend_schema(request=UserCreateSerializer, responses={201: UserSerializer})
     def post(self, request):
+        import logging
+        logger = logging.getLogger(__name__)
+        
         serializer = UserCreateSerializer(data=request.data)
         if serializer.is_valid():
             user = serializer.save()
@@ -42,6 +45,10 @@ class RegisterView(APIView):
                 UserSerializer(user).data,
                 status=status.HTTP_201_CREATED
             )
+        
+        # Log validation errors for debugging
+        logger.error(f"Registration validation errors: {serializer.errors}")
+        logger.error(f"Request data: {request.data}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -145,6 +152,52 @@ class UserViewSet(viewsets.ModelViewSet):
 
             return Response({'message': 'Password changed successfully.'})
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['delete'])
+    def delete_account(self, request):
+        """Delete user account (requires password confirmation)"""
+        password = request.data.get('password')
+
+        if not password:
+            return Response(
+                {'error': 'Password is required to delete account'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Verify password
+        if not request.user.check_password(password):
+            return Response(
+                {'error': 'Incorrect password'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check for active subscriptions
+        active_subscriptions = request.user.subscriptions.filter(status='active').count()
+        if active_subscriptions > 0:
+            return Response(
+                {'error': f'Cannot delete account with {active_subscriptions} active subscription(s). Please cancel them first.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user_email = request.user.email
+        user_id = str(request.user.id)
+
+        create_audit_log(
+            user=request.user,
+            action='delete',
+            resource_type='user',
+            resource_id=user_id,
+            description=f'User account {user_email} deleted by user',
+            request=request
+        )
+
+        # Delete user account (cascading will delete related objects)
+        request.user.delete()
+
+        return Response(
+            {'message': 'Account deleted successfully'},
+            status=status.HTTP_200_OK
+        )
 
     def perform_destroy(self, instance):
         create_audit_log(
@@ -265,7 +318,7 @@ class OrderViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['status', 'payment_method']
-    http_method_names = ['get', 'post', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
 
     def get_queryset(self):
         if self.request.user.is_staff:
@@ -277,16 +330,84 @@ class OrderViewSet(viewsets.ModelViewSet):
             return OrderCreateSerializer
         return OrderSerializer
 
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
+        """Override create to return full order data"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         order = serializer.save()
 
         create_audit_log(
-            user=self.request.user,
+            user=request.user,
             action='create',
             resource_type='order',
             resource_id=str(order.id),
             description=f'Order {order.order_number} created',
-            request=self.request
+            request=request
+        )
+
+        # Return full order data using OrderSerializer
+        output_serializer = OrderSerializer(order)
+        headers = self.get_success_headers(output_serializer.data)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(detail=True, methods=['patch'])
+    def cancel(self, request, pk=None):
+        """Cancel an order"""
+        order = self.get_object()
+        
+        # Only allow cancelling pending or processing orders
+        if order.status not in ['pending', 'processing']:
+            return Response(
+                {'error': 'Only pending or processing orders can be cancelled'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        old_status = order.status
+        order.status = 'cancelled'
+        order.save()
+
+        create_audit_log(
+            user=request.user,
+            action='update',
+            resource_type='order',
+            resource_id=str(order.id),
+            description=f'Order {order.order_number} cancelled (was {old_status})',
+            request=request
+        )
+
+        # Cancel related invoice if exists
+        if hasattr(order, 'invoice') and order.invoice:
+            order.invoice.delete()
+
+        return Response(OrderSerializer(order).data)
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete order - only allowed for cancelled orders"""
+        order = self.get_object()
+
+        # Only allow deleting cancelled orders
+        if order.status != 'cancelled':
+            return Response(
+                {'error': 'Only cancelled orders can be deleted'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        order_number = order.order_number
+
+        create_audit_log(
+            user=request.user,
+            action='delete',
+            resource_type='order',
+            resource_id=str(order.id),
+            description=f'Order {order_number} deleted by user',
+            request=request
+        )
+
+        order.delete()
+
+        return Response(
+            {'message': f'Order {order_number} deleted successfully'},
+            status=status.HTTP_204_NO_CONTENT
         )
 
 

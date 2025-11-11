@@ -208,11 +208,15 @@ class Order(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.order_number:
-            # Generate order number
+            # Generate order number (ECPay limit: 20 characters)
+            # Format: YYMMDDHHmmss + 6-char random = 16 chars total
             from django.utils import timezone
-            timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
-            random_suffix = str(uuid.uuid4())[:8].upper()
-            self.order_number = f"ORD{timestamp}{random_suffix}"
+            import random
+            import string
+
+            timestamp = timezone.now().strftime('%y%m%d%H%M%S')  # 12 chars: YYMMDDHHmmss
+            random_suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))  # 6 chars
+            self.order_number = f"{timestamp}{random_suffix}"  # Total: 18 chars (safe for ECPay)
         super().save(*args, **kwargs)
 
 
@@ -268,11 +272,15 @@ class Invoice(models.Model):
 
     def save(self, *args, **kwargs):
         if not self.invoice_number:
-            # Generate invoice number
+            # Generate invoice number (keeping under 20 chars for consistency)
+            # Format: INV + YYMMDDHHmmss + 5-char random = 20 chars total
             from django.utils import timezone
-            timestamp = timezone.now().strftime('%Y%m%d%H%M%S')
-            random_suffix = str(uuid.uuid4())[:8].upper()
-            self.invoice_number = f"INV{timestamp}{random_suffix}"
+            import random
+            import string
+
+            timestamp = timezone.now().strftime('%y%m%d%H%M%S')  # 12 chars
+            random_suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))  # 5 chars
+            self.invoice_number = f"INV{timestamp}{random_suffix}"  # Total: 20 chars
         super().save(*args, **kwargs)
 
 

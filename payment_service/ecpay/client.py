@@ -18,13 +18,23 @@ class ECPayClient:
         self.hash_iv = hash_iv
         self.payment_url = payment_url
 
-    def generate_check_mac_value(self, params: Dict[str, Any]) -> str:
+    def generate_check_mac_value(self, params: Dict[str, Any], encrypt_type: int = 1) -> str:
         """
         Generate CheckMacValue for ECPay
         Reference: https://developers.ecpay.com.tw/?p=2509
+
+        Args:
+            params: Payment parameters
+            encrypt_type: 0 = MD5, 1 = SHA256 (default: 1)
         """
-        # Sort parameters by key
-        sorted_params = sorted(params.items())
+        # Remove CheckMacValue if exists
+        params_copy = {k: v for k, v in params.items() if k != 'CheckMacValue'}
+
+        # Convert all values to strings
+        params_copy = {k: str(v) for k, v in params_copy.items()}
+
+        # Sort parameters by key (case-sensitive alphabetical order)
+        sorted_params = sorted(params_copy.items(), key=lambda x: x[0])
 
         # Create parameter string
         param_str = '&'.join([f'{key}={value}' for key, value in sorted_params])
@@ -32,13 +42,17 @@ class ECPayClient:
         # Add HashKey and HashIV
         raw_str = f"HashKey={self.hash_key}&{param_str}&HashIV={self.hash_iv}"
 
+        logger.debug(f"Raw string before encoding: {raw_str}")
+
         # URL encode
         encoded_str = quote_plus(raw_str)
+
+        logger.debug(f"After URL encode: {encoded_str}")
 
         # Convert to lowercase
         encoded_str = encoded_str.lower()
 
-        # Replace special characters back
+        # Replace special characters back (ECPay specific requirement)
         encoded_str = encoded_str.replace('%2d', '-')
         encoded_str = encoded_str.replace('%5f', '_')
         encoded_str = encoded_str.replace('%2e', '.')
@@ -47,8 +61,17 @@ class ECPayClient:
         encoded_str = encoded_str.replace('%28', '(')
         encoded_str = encoded_str.replace('%29', ')')
 
-        # Generate MD5 hash
-        check_mac_value = hashlib.md5(encoded_str.encode('utf-8')).hexdigest().upper()
+        logger.debug(f"After special char replacement: {encoded_str}")
+
+        # Generate hash based on encrypt_type
+        if encrypt_type == 1:
+            # SHA256
+            check_mac_value = hashlib.sha256(encoded_str.encode('utf-8')).hexdigest().upper()
+        else:
+            # MD5
+            check_mac_value = hashlib.md5(encoded_str.encode('utf-8')).hexdigest().upper()
+
+        logger.info(f"Generated CheckMacValue (encrypt_type={encrypt_type}): {check_mac_value}")
 
         return check_mac_value
 
@@ -101,7 +124,7 @@ class ECPayClient:
         }
 
         # Generate CheckMacValue
-        check_mac_value = self.generate_check_mac_value(params)
+        check_mac_value = self.generate_check_mac_value(params, encrypt_type)
         params['CheckMacValue'] = check_mac_value
 
         logger.info(f"Created payment for order: {merchant_trade_no}")

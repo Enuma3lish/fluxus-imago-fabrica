@@ -102,6 +102,7 @@ def show_login_page():
                                 username=username,
                                 email=email,
                                 password=password,
+                                password_confirm=password_confirm,
                                 first_name=first_name,
                                 last_name=last_name
                             )
@@ -140,8 +141,10 @@ def show_dashboard():
 
     # Recent subscriptions
     st.subheader("📋 Your Subscriptions")
-    if subscriptions:
-        for sub in subscriptions[:5]:
+    # Filter out cancelled subscriptions
+    active_subscriptions = [sub for sub in subscriptions if sub['status'] != 'cancelled']
+    if active_subscriptions:
+        for sub in active_subscriptions[:5]:
             with st.container():
                 col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
                 with col1:
@@ -151,11 +154,24 @@ def show_dashboard():
                 with col3:
                     st.write(f"${sub['plan']['price']}/{sub['plan']['billing_cycle']}")
                 with col4:
-                    if sub['status'] == 'active' and st.button("Cancel", key=f"cancel_{sub['id']}"):
-                        result = api_client.update_subscription_status(sub['id'], 'cancelled')
-                        if result:
-                            st.success("Subscription cancelled")
+                    if sub['status'] == 'active':
+                        if st.button("❌ Cancel", key=f"cancel_{sub['id']}", help="Cancel this subscription"):
+                            # Show confirmation in session state
+                            st.session_state[f'confirm_cancel_sub_{sub["id"]}'] = True
                             st.rerun()
+
+                        # Check if confirmation is needed
+                        if st.session_state.get(f'confirm_cancel_sub_{sub["id"]}'):
+                            st.warning("⚠️ Are you sure? Click Cancel again to confirm.")
+                            if st.button("✅ Confirm Cancel", key=f"confirm_cancel_{sub['id']}", type="primary"):
+                                result = api_client.update_subscription_status(sub['id'], 'cancelled')
+                                if result:
+                                    st.success("Subscription cancelled successfully!")
+                                    st.session_state.pop(f'confirm_cancel_sub_{sub["id"]}', None)
+                                    st.rerun()
+                            if st.button("↩️ Keep Subscription", key=f"keep_sub_{sub['id']}"):
+                                st.session_state.pop(f'confirm_cancel_sub_{sub["id"]}', None)
+                                st.rerun()
                 st.divider()
     else:
         st.info("No active subscriptions. Browse plans to get started!")
@@ -165,9 +181,9 @@ def show_dashboard():
     # Recent orders
     st.subheader("💳 Recent Orders")
     if orders:
-        for order in orders[:5]:
+        for order in orders[:10]:
             with st.container():
-                col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
+                col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 2])
                 with col1:
                     st.write(f"**{order['order_number']}**")
                 with col2:
@@ -183,6 +199,32 @@ def show_dashboard():
                     st.write(f"${order['amount']}")
                 with col4:
                     st.write(order['created_at'][:10])
+                with col5:
+                    # Show appropriate action buttons based on status
+                    if order['status'] == 'pending':
+                        # For pending orders, show "Pay Now" button
+                        if st.button("💳 Pay", key=f"pay_order_{order['id']}", help="Continue to payment"):
+                            # Get plan details for payment
+                            if order.get('plan'):
+                                payment = api_client.create_payment(
+                                    order_id=order['id'],
+                                    order_number=order['order_number'],
+                                    amount=int(float(order['amount'])),
+                                    item_name=order['plan']['name'],
+                                    payment_method=order.get('payment_method', 'credit_card')
+                                )
+                                if payment and payment.get('success'):
+                                    st.session_state['payment_data'] = payment
+                                    st.session_state['order'] = order
+                                    st.session_state['show_payment_form'] = True
+                                    st.rerun()
+                    elif order['status'] in ['pending', 'processing', 'failed']:
+                        # For pending/processing/failed orders, show cancel button
+                        if st.button("❌", key=f"cancel_order_{order['id']}", help="Cancel order"):
+                            result = api_client.cancel_order(order['id'])
+                            if result:
+                                st.success("Order cancelled")
+                                st.rerun()
                 st.divider()
     else:
         st.info("No orders yet")
@@ -236,11 +278,20 @@ def show_checkout_page():
     """Checkout page"""
     if 'selected_plan' not in st.session_state:
         st.warning("Please select a plan first")
+        if st.button("← Back to Plans"):
+            st.session_state.pop('page', None)
+            st.rerun()
         return
 
     plan = st.session_state['selected_plan']
 
     st.markdown('<h1 class="main-header">🛒 Checkout</h1>', unsafe_allow_html=True)
+    
+    # Back button
+    if st.button("← Back to Plans"):
+        st.session_state.pop('page', None)
+        st.session_state.pop('selected_plan', None)
+        st.rerun()
 
     col1, col2 = st.columns([2, 1])
 
@@ -258,12 +309,12 @@ def show_checkout_page():
         st.subheader("Payment Method")
         payment_method = st.selectbox(
             "Select Payment Method",
-            options=["Credit", "ATM", "CVS", "BARCODE"],
+            options=["credit_card", "atm", "cvs", "barcode"],
             format_func=lambda x: {
-                "Credit": "💳 Credit Card",
-                "ATM": "🏦 ATM Transfer",
-                "CVS": "🏪 Convenience Store",
-                "BARCODE": "📊 Barcode"
+                "credit_card": "💳 Credit Card",
+                "atm": "🏦 ATM Transfer",
+                "cvs": "🏪 Convenience Store",
+                "barcode": "📊 Barcode"
             }[x]
         )
 
@@ -287,43 +338,360 @@ def show_checkout_page():
                 # Create order
                 order = api_client.create_order(
                     plan_id=plan['id'],
-                    payment_method=payment_method.lower().replace(' ', '_'),
+                    payment_method=payment_method,
                     notes=notes
                 )
 
-                if order:
+                if not order:
+                    st.error("Failed to create order. Please check if the backend service is running and try again.")
+                elif 'id' not in order:
+                    st.error("Order created but missing ID. Please contact support.")
+                elif 'order_number' not in order:
+                    st.error("Order created but missing order number. Please contact support.")
+                elif order and 'id' in order and 'order_number' in order:
                     # Create payment
                     payment = api_client.create_payment(
                         order_id=order['id'],
+                        order_number=order['order_number'],
                         amount=int(float(plan['price'])),
                         item_name=plan['name'],
                         payment_method=payment_method
                     )
 
                     if payment and payment.get('success'):
-                        # Store payment info and redirect
+                        # Store payment info in session
                         st.session_state['payment_data'] = payment
                         st.session_state['order'] = order
-                        st.success("Order created! Redirecting to payment...")
-
-                        # Generate ECPay form
-                        form_html = f"""
-                        <html>
-                        <body>
-                        <form id="ecpay_form" method="post" action="{payment['payment_url']}">
-                        """
-                        for key, value in payment['form_data'].items():
-                            form_html += f'<input type="hidden" name="{key}" value="{value}">'
-                        form_html += """
-                        </form>
-                        <script>document.getElementById('ecpay_form').submit();</script>
-                        </body>
-                        </html>
-                        """
-
-                        st.components.v1.html(form_html, height=0)
+                        st.session_state['show_payment_form'] = True
+                        st.rerun()
                     else:
-                        st.error("Failed to create payment")
+                        st.error("Failed to create payment. Please try again.")
+
+
+def show_payment_form():
+    """Display ECPay payment form and auto-submit"""
+    if 'payment_data' not in st.session_state or 'order' not in st.session_state:
+        st.error("Payment data not found. Please try again.")
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if st.button("← Back to Dashboard", use_container_width=True):
+                st.session_state.pop('show_payment_form', None)
+                st.session_state.pop('payment_data', None)
+                st.session_state.pop('order', None)
+                st.rerun()
+        return
+
+    payment = st.session_state['payment_data']
+    order = st.session_state['order']
+
+    st.markdown('<h1 class="main-header">🔄 Redirecting to Payment Gateway</h1>', unsafe_allow_html=True)
+
+    # Add cancel button at the top
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("✕ Cancel", help="Cancel and return to dashboard"):
+            st.session_state.pop('show_payment_form', None)
+            st.session_state.pop('payment_data', None)
+            st.session_state.pop('order', None)
+            st.rerun()
+
+    st.success(f"✅ Order #{order['order_number']} created successfully!")
+
+    st.divider()
+
+    st.subheader("📱 Proceed to Payment")
+    st.write("Click the button below to open ECPay payment gateway in a new window.")
+    st.info("💡 **Tip**: If the window doesn't open, please allow pop-ups for this site.")
+
+    # Generate ECPay form that opens in new window
+    form_html = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                text-align: center;
+                padding: 20px;
+            }}
+            .payment-button {{
+                background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                padding: 20px 50px;
+                font-size: 18px;
+                font-weight: bold;
+                border-radius: 10px;
+                cursor: pointer;
+                margin: 20px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+                transition: all 0.3s;
+            }}
+            .payment-button:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 6px 8px rgba(0,0,0,0.3);
+            }}
+            .info {{
+                color: #666;
+                margin-top: 20px;
+                font-size: 14px;
+            }}
+        </style>
+    </head>
+    <body>
+        <form id="ecpay_form" method="post" action="{payment['payment_url']}" target="_blank">
+    """
+
+    for key, value in payment['form_data'].items():
+        form_html += f'<input type="hidden" name="{key}" value="{value}">\n'
+
+    form_html += """
+            <button type="submit" class="payment-button" onclick="showMessage()">
+                💳 Open ECPay Payment Gateway
+            </button>
+        </form>
+        <div class="info" id="message"></div>
+
+        <script>
+            function showMessage() {
+                document.getElementById('message').innerHTML = '✅ Payment window opened! Please complete the payment in the new window.';
+            }
+        </script>
+    </body>
+    </html>
+    """
+
+    st.components.v1.html(form_html, height=200, scrolling=False)
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("← Back to Dashboard", use_container_width=True):
+            st.session_state.pop('show_payment_form', None)
+            st.session_state.pop('payment_data', None)
+            st.session_state.pop('order', None)
+            st.rerun()
+    with col2:
+        if st.button("🔄 Regenerate Payment Link", use_container_width=True):
+            st.rerun()
+
+
+def show_subscriptions_page():
+    """Subscriptions management page"""
+    st.markdown('<h1 class="main-header">💎 My Subscriptions</h1>', unsafe_allow_html=True)
+
+    subscriptions = api_client.get_subscriptions()
+
+    if not subscriptions:
+        st.info("You don't have any subscriptions yet. Browse plans to get started!")
+
+        if st.button("💎 Browse Plans", use_container_width=True, type="primary"):
+            st.session_state['selected_page'] = 'Plans'
+            st.rerun()
+        return
+
+    # Filter options
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        status_filter = st.selectbox(
+            "Filter by status",
+            options=["All", "Active", "Cancelled", "Expired"],
+            index=0
+        )
+
+    # Filter subscriptions
+    if status_filter != "All":
+        filtered_subs = [s for s in subscriptions if s['status'] == status_filter.lower()]
+    else:
+        filtered_subs = subscriptions
+
+    # Count active subscriptions
+    active_subs = [s for s in subscriptions if s['status'] == 'active']
+
+    # Display stats
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"**Total Subscriptions:** {len(filtered_subs)}")
+    with col2:
+        st.write(f"**Active Subscriptions:** {len(active_subs)}")
+
+    st.divider()
+
+    # Display subscriptions
+    for sub in filtered_subs:
+        with st.expander(f"💎 {sub['plan']['name']} - {sub['status'].upper()}", expanded=sub['status'] == 'active'):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.write(f"**Plan:** {sub['plan']['name']}")
+                st.write(f"**Status:** {sub['status'].upper()}")
+                st.write(f"**Price:** ${sub['plan']['price']}/{sub['plan']['billing_cycle']}")
+                st.write(f"**Start Date:** {sub['start_date'][:10]}")
+                if sub.get('end_date'):
+                    st.write(f"**End Date:** {sub['end_date'][:10]}")
+
+            with col2:
+                if sub['plan'].get('description'):
+                    st.write(f"**Description:**")
+                    st.write(sub['plan']['description'])
+
+                # Show features if available
+                if sub['plan'].get('features'):
+                    st.write(f"**Features:**")
+                    for feature in sub['plan']['features']:
+                        st.write(f"✓ {feature}")
+
+            st.divider()
+
+            # Action buttons
+            if sub['status'] == 'active':
+                col1, col2, col3 = st.columns([1, 1, 2])
+
+                with col1:
+                    if st.button("❌ Cancel Subscription", key=f"cancel_sub_page_{sub['id']}", use_container_width=True):
+                        st.session_state[f'confirm_cancel_subscription_{sub["id"]}'] = True
+                        st.rerun()
+
+                # Confirmation dialog
+                if st.session_state.get(f'confirm_cancel_subscription_{sub["id"]}'):
+                    st.warning("⚠️ **Are you sure you want to cancel this subscription?**")
+                    st.write("You will lose access to the plan benefits.")
+
+                    ccol1, ccol2, ccol3 = st.columns([1, 1, 1])
+                    with ccol1:
+                        if st.button("✅ Yes, Cancel", key=f"confirm_cancel_sub_page_{sub['id']}", type="primary", use_container_width=True):
+                            result = api_client.update_subscription_status(sub['id'], 'cancelled')
+                            if result:
+                                st.success("✅ Subscription cancelled successfully!")
+                                st.session_state.pop(f'confirm_cancel_subscription_{sub["id"]}', None)
+                                st.rerun()
+                    with ccol2:
+                        if st.button("↩️ No, Keep It", key=f"keep_subscription_{sub['id']}", use_container_width=True):
+                            st.session_state.pop(f'confirm_cancel_subscription_{sub["id"]}', None)
+                            st.rerun()
+
+
+def show_orders_page():
+    """Orders management page"""
+    st.markdown('<h1 class="main-header">📦 My Orders</h1>', unsafe_allow_html=True)
+
+    orders = api_client.get_orders()
+
+    if not orders:
+        st.info("No orders yet. Browse plans to get started!")
+        return
+
+    # Filter options and bulk actions
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        status_filter = st.selectbox(
+            "Filter by status",
+            options=["All", "Pending", "Processing", "Completed", "Failed", "Cancelled"],
+            index=0
+        )
+
+    # Filter orders
+    if status_filter != "All":
+        filtered_orders = [o for o in orders if o['status'] == status_filter.lower()]
+    else:
+        filtered_orders = orders
+
+    # Count cancelled orders
+    cancelled_orders = [o for o in orders if o['status'] == 'cancelled']
+
+    # Display stats and bulk delete button
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        st.write(f"**Total Orders:** {len(filtered_orders)}")
+    with col2:
+        st.write(f"**Cancelled Orders:** {len(cancelled_orders)}")
+    with col3:
+        if len(cancelled_orders) > 0:
+            if st.button("🗑️ Clear All", help="Delete all cancelled orders", type="secondary"):
+                if st.session_state.get('confirm_bulk_delete'):
+                    # Perform bulk delete
+                    deleted_count = 0
+                    for order in cancelled_orders:
+                        if api_client.delete_order(order['id']):
+                            deleted_count += 1
+                    st.session_state.pop('confirm_bulk_delete', None)
+                    st.success(f"✅ Successfully deleted {deleted_count} cancelled order(s)!")
+                    st.rerun()
+                else:
+                    st.session_state['confirm_bulk_delete'] = True
+                    st.warning(f"⚠️ This will delete {len(cancelled_orders)} cancelled order(s). Click again to confirm.")
+                    st.rerun()
+
+    st.divider()
+
+    # Display orders
+    for order in filtered_orders:
+        with st.expander(f"Order #{order['order_number']} - {order['status'].upper()}", expanded=False):
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.write(f"**Order Number:** {order['order_number']}")
+                st.write(f"**Status:** {order['status'].upper()}")
+                st.write(f"**Amount:** ${order['amount']}")
+                st.write(f"**Created:** {order['created_at'][:16].replace('T', ' ')}")
+                if order.get('payment_method'):
+                    method_display = {
+                        'credit_card': '💳 Credit Card',
+                        'atm': '🏦 ATM Transfer',
+                        'cvs': '🏪 Convenience Store',
+                        'barcode': '📊 Barcode'
+                    }
+                    st.write(f"**Payment Method:** {method_display.get(order['payment_method'], order['payment_method'])}")
+
+            with col2:
+                if order.get('plan'):
+                    st.write(f"**Plan:** {order['plan']['name']}")
+                    st.write(f"**Plan Price:** ${order['plan']['price']}")
+                    st.write(f"**Billing Cycle:** {order['plan']['billing_cycle']}")
+                if order.get('notes'):
+                    st.write(f"**Notes:** {order['notes']}")
+
+            st.divider()
+
+            # Action buttons
+            col1, col2, col3 = st.columns([1, 1, 3])
+
+            with col1:
+                if order['status'] == 'pending':
+                    if st.button("💳 Pay Now", key=f"pay_order_page_{order['id']}", use_container_width=True):
+                        if order.get('plan'):
+                            payment = api_client.create_payment(
+                                order_id=order['id'],
+                                order_number=order['order_number'],
+                                amount=int(float(order['amount'])),
+                                item_name=order['plan']['name'],
+                                payment_method=order.get('payment_method', 'credit_card')
+                            )
+                            if payment and payment.get('success'):
+                                st.session_state['payment_data'] = payment
+                                st.session_state['order'] = order
+                                st.session_state['show_payment_form'] = True
+                                st.rerun()
+
+            with col2:
+                if order['status'] in ['pending', 'processing', 'failed']:
+                    if st.button("❌ Cancel", key=f"cancel_order_page_{order['id']}", use_container_width=True):
+                        result = api_client.cancel_order(order['id'])
+                        if result:
+                            st.success("Order cancelled successfully!")
+                            st.rerun()
+                elif order['status'] == 'cancelled':
+                    if st.button("🗑️ Delete", key=f"delete_order_page_{order['id']}", use_container_width=True, type="secondary"):
+                        if st.session_state.get(f'confirm_delete_{order["id"]}'):
+                            if api_client.delete_order(order['id']):
+                                st.success("Order deleted successfully!")
+                                st.session_state.pop(f'confirm_delete_{order["id"]}', None)
+                                st.rerun()
+                        else:
+                            st.session_state[f'confirm_delete_{order["id"]}'] = True
+                            st.warning("⚠️ Click Delete again to confirm")
+                            st.rerun()
 
 
 def show_invoices_page():
@@ -356,11 +724,108 @@ def show_invoices_page():
                 st.link_button("Download PDF", invoice['pdf_url'])
 
 
+def show_payment_result():
+    """Payment result page (shown after ECPay redirect) - No authentication required"""
+    st.markdown('<h1 class="main-header">💳 Payment Result</h1>', unsafe_allow_html=True)
+
+    # Get query parameters from URL
+    query_params = st.query_params
+
+    # Check if we have payment result info
+    if 'RtnCode' in query_params or 'status' in query_params:
+        # ECPay returns with RtnCode parameter
+        rtn_code = query_params.get('RtnCode', ['0'])[0] if isinstance(query_params.get('RtnCode', '0'), list) else query_params.get('RtnCode', '0')
+
+        if rtn_code == '1':
+            st.success("✅ Payment Successful!")
+            st.balloons()
+
+            st.write("Your payment has been processed successfully.")
+            st.write("Thank you for your purchase!")
+
+            # Show order details if available
+            if 'MerchantTradeNo' in query_params:
+                order_no = query_params.get('MerchantTradeNo', [''])[0] if isinstance(query_params.get('MerchantTradeNo', ''), list) else query_params.get('MerchantTradeNo', '')
+                st.info(f"📦 Order Number: {order_no}")
+
+            # Auto redirect with countdown
+            st.divider()
+
+            placeholder = st.empty()
+
+            import time
+            for seconds in range(3, 0, -1):
+                placeholder.info(f"⏱️ Redirecting to Dashboard in {seconds} second{'s' if seconds > 1 else ''}...")
+                time.sleep(1)
+
+            placeholder.success("✨ Redirecting now...")
+            st.query_params.clear()
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.error("❌ Payment Failed")
+            st.write("Unfortunately, your payment could not be processed.")
+
+            # Show error message if available
+            if 'RtnMsg' in query_params:
+                rtn_msg = query_params.get('RtnMsg', [''])[0] if isinstance(query_params.get('RtnMsg', ''), list) else query_params.get('RtnMsg', '')
+                st.warning(f"Error: {rtn_msg}")
+    else:
+        # Generic payment result page
+        st.info("🔄 Payment completed!")
+        st.write("Your payment has been processed.")
+        st.write("Please login to check your orders and subscription status.")
+
+    st.divider()
+
+    # Check if user is authenticated
+    is_logged_in = is_authenticated()
+
+    if is_logged_in:
+        # Show navigation buttons for authenticated users
+        st.subheader("📍 What's Next?")
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col1:
+            if st.button("📦 View Orders", use_container_width=True):
+                st.query_params.clear()
+                st.session_state['selected_page'] = 'Orders'
+                st.rerun()
+        with col2:
+            if st.button("🏠 Dashboard", use_container_width=True):
+                st.query_params.clear()
+                st.rerun()
+        with col3:
+            if st.button("💎 Browse Plans", use_container_width=True):
+                st.query_params.clear()
+                st.session_state['selected_page'] = 'Plans'
+                st.rerun()
+    else:
+        # Show login prompt for non-authenticated users
+        st.warning("⚠️ Your session may have expired. Please login to view your order details.")
+
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            if st.button("🔐 Login to Continue", use_container_width=True, type="primary"):
+                st.query_params.clear()
+                st.rerun()
+
+
 def main():
     """Main application"""
+    # Check if we're on the payment result page (from ECPay redirect)
+    query_params = st.query_params
+    if 'page' in query_params or 'RtnCode' in query_params or 'MerchantTradeNo' in query_params:
+        show_payment_result()
+        return
+
     # Check if user is authenticated
     if not is_authenticated():
         show_login_page()
+        return
+
+    # Check if we need to show payment form (hide sidebar for payment page)
+    if 'show_payment_form' in st.session_state and st.session_state['show_payment_form']:
+        show_payment_form()
         return
 
     # Sidebar navigation
@@ -370,11 +835,19 @@ def main():
         st.write(f"📧 {user['email']}")
         st.divider()
 
+        # Check if there's a selected page from session state
+        default_idx = 0
+        if 'selected_page' in st.session_state:
+            options = ["Dashboard", "Plans", "Subscriptions", "Orders", "Invoices", "Settings"]
+            if st.session_state['selected_page'] in options:
+                default_idx = options.index(st.session_state['selected_page'])
+            st.session_state.pop('selected_page', None)
+
         selected = option_menu(
             menu_title="Navigation",
-            options=["Dashboard", "Plans", "Invoices", "Settings"],
-            icons=["speedometer2", "gem", "file-text", "gear"],
-            default_index=0,
+            options=["Dashboard", "Plans", "Subscriptions", "Orders", "Invoices", "Settings"],
+            icons=["speedometer2", "gem", "star", "box-seam", "file-text", "gear"],
+            default_index=default_idx,
         )
 
         st.divider()
@@ -383,6 +856,14 @@ def main():
             api_client.logout()
             st.rerun()
 
+    # Clear checkout page state when navigating via sidebar
+    if 'page' in st.session_state and st.session_state['page'] == 'checkout':
+        # If user navigates away using sidebar, clear the checkout state
+        if 'last_selected' in st.session_state and st.session_state['last_selected'] != selected:
+            st.session_state.pop('page', None)
+            st.session_state.pop('selected_plan', None)
+        st.session_state['last_selected'] = selected
+
     # Show selected page
     if 'page' in st.session_state and st.session_state['page'] == 'checkout':
         show_checkout_page()
@@ -390,11 +871,98 @@ def main():
         show_dashboard()
     elif selected == "Plans":
         show_plans_page()
+    elif selected == "Subscriptions":
+        show_subscriptions_page()
+    elif selected == "Orders":
+        show_orders_page()
     elif selected == "Invoices":
         show_invoices_page()
     elif selected == "Settings":
         st.markdown('<h1 class="main-header">⚙️ Settings</h1>', unsafe_allow_html=True)
-        st.info("Settings page coming soon!")
+
+        user = get_current_user()
+
+        # Account Information Section
+        st.subheader("👤 Account Information")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Username:** {user['username']}")
+            st.write(f"**Email:** {user['email']}")
+        with col2:
+            if user.get('first_name') or user.get('last_name'):
+                st.write(f"**Name:** {user.get('first_name', '')} {user.get('last_name', '')}")
+            st.write(f"**Account Created:** {user['created_at'][:10]}")
+
+        st.divider()
+
+        # Account Actions Section
+        st.subheader("🔧 Account Actions")
+
+        # Change Password
+        with st.expander("🔑 Change Password", expanded=False):
+            with st.form("change_password_form"):
+                old_password = st.text_input("Current Password", type="password")
+                new_password = st.text_input("New Password", type="password")
+                confirm_password = st.text_input("Confirm New Password", type="password")
+                submit = st.form_submit_button("Change Password")
+
+                if submit:
+                    if not old_password or not new_password:
+                        st.error("All fields are required")
+                    elif new_password != confirm_password:
+                        st.error("New passwords don't match")
+                    else:
+                        st.info("Password change functionality coming soon!")
+
+        st.divider()
+
+        # Danger Zone
+        st.subheader("⚠️ Danger Zone")
+
+        with st.expander("🗑️ Delete Account", expanded=False):
+            st.warning("**Warning:** This action cannot be undone. All your data will be permanently deleted.")
+
+            # Check for active subscriptions
+            subscriptions = api_client.get_subscriptions()
+            active_subs = [s for s in subscriptions if s['status'] == 'active']
+
+            if active_subs:
+                st.error(f"❌ You have {len(active_subs)} active subscription(s). Please cancel them before deleting your account.")
+                st.write("**Active Subscriptions:**")
+                for sub in active_subs:
+                    st.write(f"- {sub['plan']['name']} ({sub['status'].upper()})")
+            else:
+                st.write("**Requirements:**")
+                st.write("- ✅ No active subscriptions")
+                st.write("- Enter your password to confirm deletion")
+
+                with st.form("delete_account_form"):
+                    st.write("**Please confirm account deletion:**")
+                    confirm_email = st.text_input("Enter your email to confirm", placeholder=user['email'])
+                    password = st.text_input("Enter your password", type="password")
+                    confirm_delete = st.checkbox("I understand this action cannot be undone")
+
+                    col1, col2, col3 = st.columns([1, 1, 1])
+                    with col2:
+                        submit_delete = st.form_submit_button("🗑️ Delete My Account", type="primary", use_container_width=True)
+
+                    if submit_delete:
+                        if not confirm_delete:
+                            st.error("Please confirm that you understand this action cannot be undone")
+                        elif confirm_email != user['email']:
+                            st.error("Email doesn't match. Please enter your email correctly.")
+                        elif not password:
+                            st.error("Password is required")
+                        else:
+                            # Attempt to delete account
+                            if api_client.delete_account(password):
+                                st.success("✅ Account deleted successfully. Redirecting...")
+                                # Clear session and redirect
+                                import time
+                                time.sleep(2)
+                                st.session_state.clear()
+                                st.rerun()
+                            # Error message already shown by api_client
 
 
 if __name__ == "__main__":

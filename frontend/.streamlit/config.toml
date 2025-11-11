@@ -1,0 +1,15 @@
+[server]
+# Enable CORS for ECPay redirects
+enableCORS = false
+enableXsrfProtection = false
+
+# Server settings
+headless = true
+port = 8501
+address = "0.0.0.0"
+
+[browser]
+# Disable server address gathering
+gatherUsageStats = false
+serverAddress = "localhost"
+serverPort = 8501
