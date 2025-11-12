@@ -7,7 +7,8 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     RegisterView, LoginView, LogoutView,
     UserViewSet, PlanViewSet, SubscriptionViewSet,
-    OrderViewSet, InvoiceViewSet, AuditLogViewSet
+    OrderViewSet, InvoiceViewSet, AuditLogViewSet,
+    process_payment_callback
 )
 
 router = DefaultRouter()
@@ -24,6 +25,9 @@ urlpatterns = [
     path('auth/login/', LoginView.as_view(), name='login'),
     path('auth/logout/', LogoutView.as_view(), name='logout'),
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
+    # Payment callback (no auth required)
+    path('orders/process-payment/', process_payment_callback, name='process-payment'),
 
     # Router URLs
     path('', include(router.urls)),

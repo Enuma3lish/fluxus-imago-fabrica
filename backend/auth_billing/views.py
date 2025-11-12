@@ -2,7 +2,7 @@
 DRF Views for API endpoints
 """
 from rest_framework import viewsets, status, permissions
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -19,6 +19,78 @@ from .serializers import (
     InvoiceSerializer, AuditLogSerializer
 )
 from .utils import create_audit_log
+
+
+# Payment callback view (no authentication required)
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def process_payment_callback(request):
+    """Process payment callback from payment service"""
+    order_number = request.data.get('order_number')
+    payment_data = request.data.get('payment_data', {})
+    payment_status = request.data.get('status')
+
+    if not order_number:
+        return Response(
+            {'error': 'Order number is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        order = Order.objects.get(order_number=order_number)
+        old_status = order.status
+
+        # Update order status
+        if payment_status == 'completed':
+            order.status = 'completed'
+            order.paid_at = timezone.now()
+            order.payment_data = payment_data
+            order.save()
+
+            # Create audit log
+            create_audit_log(
+                user=order.user,
+                action='update',
+                resource_type='order',
+                resource_id=str(order.id),
+                description=f'Order {order.order_number} payment completed (was {old_status})',
+                request=request
+            )
+
+            return Response({
+                'success': True,
+                'message': 'Payment processed successfully',
+                'order': OrderSerializer(order).data
+            })
+        else:
+            order.status = 'failed'
+            order.save()
+
+            create_audit_log(
+                user=order.user,
+                action='update',
+                resource_type='order',
+                resource_id=str(order.id),
+                description=f'Order {order.order_number} payment failed',
+                request=request
+            )
+
+            return Response({
+                'success': False,
+                'message': 'Payment failed',
+                'order': OrderSerializer(order).data
+            })
+
+    except Order.DoesNotExist:
+        return Response(
+            {'error': f'Order {order_number} not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except Exception as e:
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 class RegisterView(APIView):
@@ -350,18 +422,89 @@ class OrderViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(output_serializer.data)
         return Response(output_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+    @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny], authentication_classes=[])
+    def process_payment(self, request):
+        """Process payment callback from payment service"""
+        from django.utils import timezone
+
+        order_number = request.data.get('order_number')
+        payment_data = request.data.get('payment_data', {})
+        payment_status = request.data.get('status')
+
+        if not order_number:
+            return Response(
+                {'error': 'Order number is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            order = Order.objects.get(order_number=order_number)
+            old_status = order.status
+
+            # Update order status
+            if payment_status == 'completed':
+                order.status = 'completed'
+                order.paid_at = timezone.now()
+                order.payment_data = payment_data
+                order.save()
+
+                # Create audit log
+                create_audit_log(
+                    user=order.user,
+                    action='update',
+                    resource_type='order',
+                    resource_id=str(order.id),
+                    description=f'Order {order.order_number} payment completed (was {old_status})',
+                    request=request
+                )
+
+                return Response({
+                    'success': True,
+                    'message': 'Payment processed successfully',
+                    'order': OrderSerializer(order).data
+                })
+            else:
+                order.status = 'failed'
+                order.save()
+
+                create_audit_log(
+                    user=order.user,
+                    action='update',
+                    resource_type='order',
+                    resource_id=str(order.id),
+                    description=f'Order {order.order_number} payment failed',
+                    request=request
+                )
+
+                return Response({
+                    'success': False,
+                    'message': 'Payment failed',
+                    'order': OrderSerializer(order).data
+                })
+
+        except Order.DoesNotExist:
+            return Response(
+                {'error': f'Order {order_number} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=True, methods=['patch'])
     def cancel(self, request, pk=None):
         """Cancel an order"""
         order = self.get_object()
-        
+
         # Only allow cancelling pending or processing orders
         if order.status not in ['pending', 'processing']:
             return Response(
                 {'error': 'Only pending or processing orders can be cancelled'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+
         old_status = order.status
         order.status = 'cancelled'
         order.save()

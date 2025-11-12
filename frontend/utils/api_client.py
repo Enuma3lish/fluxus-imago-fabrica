@@ -150,9 +150,12 @@ class APIClient:
 
             if response.status_code == 200:
                 data = response.json()
+
+                # Save to session state
                 st.session_state[SESSION_USER] = data['user']
                 st.session_state[SESSION_ACCESS_TOKEN] = data['tokens']['access']
                 st.session_state[SESSION_REFRESH_TOKEN] = data['tokens']['refresh']
+
                 return data
             else:
                 return self.handle_response(response)

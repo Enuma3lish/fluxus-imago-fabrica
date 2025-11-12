@@ -64,7 +64,8 @@ Multi-service architecture for user management, subscriptions, and payment proce
 - Python 3.11+
 - PostgreSQL 15+
 - Redis 7+
-
+### ECpay credit card test
+4311-9522-2222-2222
 ### Setup
 
 1. Clone the repository:

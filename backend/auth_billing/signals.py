@@ -14,7 +14,8 @@ def create_invoice_on_order_completion(sender, instance, created, **kwargs):
         # Check if invoice already exists
         if not hasattr(instance, 'invoice'):
             # Calculate tax (5% Taiwan business tax)
-            tax_amount = instance.amount * 0.05
+            from decimal import Decimal
+            tax_amount = instance.amount * Decimal('0.05')
             total_amount = instance.amount + tax_amount
 
             Invoice.objects.create(
